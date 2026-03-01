@@ -55,6 +55,12 @@ export function ProviderCard({ provider }: { provider: Provider }) {
             </span>
           </div>
           <div className="flex justify-between">
+            <span className="text-muted-foreground">Endpoint</span>
+            <span className="font-mono text-xs truncate max-w-[180px]" title={provider.endpoint}>
+              {provider.endpoint}
+            </span>
+          </div>
+          <div className="flex justify-between">
             <span className="text-muted-foreground">Wallet</span>
             <span className="font-mono text-xs">
               {truncateAddress(provider.walletAddress)}

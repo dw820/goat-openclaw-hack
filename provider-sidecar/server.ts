@@ -1,4 +1,9 @@
-import 'dotenv/config'
+import dotenv from 'dotenv'
+import { fileURLToPath } from 'node:url'
+import { dirname, join } from 'node:path'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+dotenv.config({ path: join(__dirname, '.env') })
 import express from 'express'
 import cors from 'cors'
 import { createOrder, verifyOrder, isMockMode } from './x402-client.js'

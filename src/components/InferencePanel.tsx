@@ -41,6 +41,8 @@ export function InferencePanel({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
+  const availableModels = provider.models?.length ? provider.models : [provider.model];
+  const [selectedModel, setSelectedModel] = useState(provider.model);
   const [prompt, setPrompt] = useState("");
   const [output, setOutput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -129,7 +131,7 @@ export function InferencePanel({
           "X-Wallet-Address": address,
         },
         body: JSON.stringify({
-          model: provider.model,
+          model: selectedModel,
           messages: [{ role: "user", content: prompt }],
           stream: true,
         }),
@@ -168,7 +170,7 @@ export function InferencePanel({
     } finally {
       setLoading(false);
     }
-  }, [prompt, loading, provider, streamResponse, connectWallet]);
+  }, [prompt, loading, provider, selectedModel, streamResponse, connectWallet]);
 
   const handlePay = useCallback(async () => {
     if (!order || !signerRef.current) return;
@@ -243,7 +245,7 @@ export function InferencePanel({
             "X-Goat-Order-Id": orderId,
           },
           body: JSON.stringify({
-            model: provider.model,
+            model: selectedModel,
             messages: [{ role: "user", content: prompt }],
             stream: true,
           }),
@@ -268,7 +270,7 @@ export function InferencePanel({
         setLoading(false);
       }
     },
-    [prompt, provider, streamResponse]
+    [prompt, provider, selectedModel, streamResponse]
   );
 
   // Poll for payment confirmation after on-chain tx
@@ -341,7 +343,7 @@ export function InferencePanel({
       <DialogContent className="max-w-2xl">
         <DialogHeader>
           <DialogTitle>
-            Inference — {provider.model} ({provider.name})
+            Inference — {selectedModel} ({provider.name})
           </DialogTitle>
         </DialogHeader>
 
@@ -485,6 +487,26 @@ export function InferencePanel({
           {/* Input area — hidden while payment flow is active */}
           {!paymentPhase && (
             <>
+              {availableModels.length > 1 && (
+                <div className="space-y-1">
+                  <label htmlFor="model-select" className="text-sm text-muted-foreground">
+                    Model
+                  </label>
+                  <select
+                    id="model-select"
+                    value={selectedModel}
+                    onChange={(e) => setSelectedModel(e.target.value)}
+                    className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                  >
+                    {availableModels.map((m) => (
+                      <option key={m} value={m}>
+                        {m}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
               <Textarea
                 placeholder="Enter your prompt…"
                 value={prompt}
