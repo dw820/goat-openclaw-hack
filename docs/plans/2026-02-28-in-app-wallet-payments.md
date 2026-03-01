@@ -1,3 +1,217 @@
+# In-App Wallet Payments Implementation Plan
+
+> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+
+**Goal:** Replace the external payment URL flow with in-app MetaMask wallet payments using the goatx402-sdk.
+
+**Architecture:** The sidecar creates orders via `GoatX402Client` (server SDK), returning full order data. The frontend uses `PaymentHelper` (client SDK) with ethers.js `BrowserProvider` to execute ERC20 transfers directly in-browser via MetaMask.
+
+**Tech Stack:** goatx402-sdk (frontend), goatx402-sdk-server (backend), ethers.js v6, Next.js 16, Express.js
+
+---
+
+### Task 1: Update Frontend Types
+
+**Files:**
+- Modify: `src/lib/types.ts`
+
+**Step 1: Replace Order and OrderStatus types**
+
+Replace the entire `Order` interface and `OrderStatus` interface with SDK-compatible shapes:
+
+```typescript
+export interface Order {
+  orderId: string;
+  flow: string;
+  tokenSymbol: string;
+  tokenContract: string;
+  payToAddress: string;
+  chainId: number;
+  amountWei: string;
+  expiresAt: number;
+}
+
+export interface OrderStatus {
+  orderId: string;
+  status: "CHECKOUT_VERIFIED" | "PAYMENT_CONFIRMED" | "INVOICED" | "FAILED" | "EXPIRED" | "CANCELLED";
+  txHash?: string;
+  confirmedAt?: string;
+}
+```
+
+**Step 2: Verify no compile errors**
+
+Run: `npx tsc --noEmit --pretty 2>&1 | head -30`
+Expected: Errors in InferencePanel.tsx and sidecar (expected — we'll fix those in later tasks).
+
+**Step 3: Commit**
+
+```bash
+git add src/lib/types.ts
+git commit -m "feat: update Order/OrderStatus types for SDK compatibility"
+```
+
+---
+
+### Task 2: Upgrade Sidecar x402 Client
+
+**Files:**
+- Modify: `provider-sidecar/x402-client.ts`
+
+**Step 1: Rewrite x402-client.ts to use GoatX402Client**
+
+Replace the entire file. The new version uses `GoatX402Client` from the server SDK:
+
+```typescript
+import crypto from 'node:crypto'
+import { GoatX402Client } from 'goatx402-sdk-server'
+import type { Order, OrderProof, OrderStatus } from 'goatx402-sdk-server'
+
+let client: GoatX402Client | null = null
+
+function getClient(): GoatX402Client {
+  if (!client) {
+    client = new GoatX402Client({
+      baseUrl: process.env.GOATX402_API_URL ?? '',
+      apiKey: process.env.GOATX402_API_KEY ?? '',
+      apiSecret: process.env.GOATX402_API_SECRET ?? '',
+    })
+  }
+  return client
+}
+
+export function isMockMode(): boolean {
+  return process.env.MOCK_PAYMENTS === 'true'
+}
+
+export async function createOrder(
+  amount: string,
+  symbol: string,
+  fromAddress: string
+): Promise<Order> {
+  const c = getClient()
+  return c.createOrder({
+    dappOrderId: crypto.randomUUID(),
+    chainId: 48816,
+    tokenSymbol: symbol,
+    amountWei: amount,
+    fromAddress,
+  })
+}
+
+export async function verifyOrder(orderId: string): Promise<OrderProof> {
+  const c = getClient()
+  return c.getOrderStatus(orderId)
+}
+```
+
+Key changes:
+- `createOrder` now takes `fromAddress` parameter (third arg)
+- Returns the full SDK `Order` (with `tokenContract`, `payToAddress`, `amountWei`, `flow`, `expiresAt`)
+- `verifyOrder` returns `OrderProof` with SDK status values (`PAYMENT_CONFIRMED` etc.)
+- Uses singleton `GoatX402Client` instance
+
+**Step 2: Commit**
+
+```bash
+git add provider-sidecar/x402-client.ts
+git commit -m "feat: upgrade sidecar to use GoatX402Client SDK"
+```
+
+---
+
+### Task 3: Update Sidecar Server to Pass Wallet Address
+
+**Files:**
+- Modify: `provider-sidecar/server.ts`
+
+**Step 1: Update the POST /v1/chat/completions handler**
+
+Read `X-Wallet-Address` header and pass it to `createOrder`. Update the 402 response to return the full SDK order. Update status checking to use SDK status values.
+
+Changes to the handler (line 16–72 of server.ts):
+
+1. In the "no orderId" branch (~line 31), read wallet address and pass to `createOrder`:
+```typescript
+const walletAddress = req.headers['x-wallet-address'] as string | undefined
+if (!walletAddress) {
+  res.status(400).json({
+    error: 'wallet_address_required',
+    message: 'X-Wallet-Address header is required for payment',
+  })
+  return
+}
+const order = await createOrder(amount, symbol, walletAddress)
+```
+
+2. In the "verify payment" branch (~line 53), update status check from `status.status === 'paid'` to `status.status === 'PAYMENT_CONFIRMED'`:
+```typescript
+if (status.status === 'PAYMENT_CONFIRMED' || status.status === 'INVOICED') {
+```
+
+**Step 2: Update the GET /api/orders/:orderId/status handler**
+
+Update mock mode response to use SDK status values:
+```typescript
+res.json({ orderId, status: 'PAYMENT_CONFIRMED', confirmedAt: new Date().toISOString(), txHash: '0xmock' })
+```
+
+**Step 3: Commit**
+
+```bash
+git add provider-sidecar/server.ts
+git commit -m "feat: pass wallet address to order creation, use SDK status values"
+```
+
+---
+
+### Task 4: Add Ethereum Window Type Declaration
+
+**Files:**
+- Create: `src/types/ethereum.d.ts`
+
+**Step 1: Create the type declaration**
+
+```typescript
+interface EthereumProvider {
+  request(args: { method: string; params?: unknown[] }): Promise<unknown>;
+  on(event: string, handler: (...args: unknown[]) => void): void;
+  removeListener(event: string, handler: (...args: unknown[]) => void): void;
+  isMetaMask?: boolean;
+}
+
+interface Window {
+  ethereum?: EthereumProvider;
+}
+```
+
+**Step 2: Commit**
+
+```bash
+git add src/types/ethereum.d.ts
+git commit -m "feat: add window.ethereum type declaration"
+```
+
+---
+
+### Task 5: Rewrite InferencePanel with In-App Wallet Payment
+
+**Files:**
+- Modify: `src/components/InferencePanel.tsx`
+
+This is the core change. The new component:
+1. Connects to MetaMask on "Send" (lazy, on-demand)
+2. Sends wallet address as `X-Wallet-Address` header
+3. On 402, shows payment card with order details
+4. On "Pay with Wallet", uses `PaymentHelper.pay(order)` — MetaMask popup
+5. After tx, polls backend for confirmation
+6. Retries inference with `X-Goat-Order-Id`
+
+**Step 1: Rewrite InferencePanel.tsx**
+
+Replace the entire file with:
+
+```tsx
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -14,7 +228,6 @@ import { Badge } from "@/components/ui/badge";
 import type { Provider, Order, OrderStatus } from "@/lib/types";
 import { ethers } from "ethers";
 import { PaymentHelper, formatUnits } from "goatx402-sdk";
-import type { Order as SdkOrder } from "goatx402-sdk";
 
 type PaymentPhase =
   | null
@@ -27,10 +240,6 @@ type PaymentPhase =
 
 const POLL_INTERVAL_MS = 3000;
 const POLL_TIMEOUT_MS = 300_000;
-
-function baseUrl(endpoint: string): string {
-  return endpoint.replace(/\/+$/, "");
-}
 
 export function InferencePanel({
   provider,
@@ -122,7 +331,7 @@ export function InferencePanel({
     abortRef.current = controller;
 
     try {
-      const res = await fetch(`${baseUrl(provider.endpoint)}/v1/chat/completions`, {
+      const res = await fetch(`${provider.endpoint}/v1/chat/completions`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -177,40 +386,8 @@ export function InferencePanel({
     setPaymentError(null);
 
     try {
-      // Ensure MetaMask is on the correct chain
-      const targetChainId = `0x${order.fromChainId.toString(16)}`;
-      try {
-        await window.ethereum?.request({
-          method: "wallet_switchEthereumChain",
-          params: [{ chainId: targetChainId }],
-        });
-      } catch (switchError: unknown) {
-        // Chain not added to MetaMask — try adding it
-        if ((switchError as { code?: number })?.code === 4902) {
-          await window.ethereum?.request({
-            method: "wallet_addEthereumChain",
-            params: [
-              {
-                chainId: targetChainId,
-                chainName: "GOAT Testnet3",
-                nativeCurrency: { name: "BTC", symbol: "BTC", decimals: 18 },
-                rpcUrls: ["https://rpc.testnet3.goat.network"],
-                blockExplorerUrls: ["https://explorer.testnet3.goat.network"],
-              },
-            ],
-          });
-        } else {
-          throw switchError;
-        }
-      }
-
-      // Re-create signer after chain switch
-      const browserProvider = new ethers.BrowserProvider(window.ethereum!);
-      const signer = await browserProvider.getSigner();
-      signerRef.current = signer;
-
-      const payment = new PaymentHelper(signer);
-      const result = await payment.pay(order as unknown as SdkOrder);
+      const payment = new PaymentHelper(signerRef.current);
+      const result = await payment.pay(order);
 
       if (!result.success) {
         setPaymentPhase("payment_failed");
@@ -236,7 +413,7 @@ export function InferencePanel({
       abortRef.current = controller;
 
       try {
-        const res = await fetch(`${baseUrl(provider.endpoint)}/v1/chat/completions`, {
+        const res = await fetch(`${provider.endpoint}/v1/chat/completions`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -271,7 +448,7 @@ export function InferencePanel({
     [prompt, provider, streamResponse]
   );
 
-  // Poll for payment confirmation after on-chain tx
+  // Poll for payment confirmation
   useEffect(() => {
     if (paymentPhase !== "awaiting_confirmation" || !order) return;
 
@@ -284,7 +461,7 @@ export function InferencePanel({
 
       try {
         const res = await fetch(
-          `${baseUrl(provider.endpoint)}/api/orders/${order.orderId}/status`
+          `${provider.endpoint}/api/orders/${order.orderId}/status`
         );
         if (!res.ok) return;
 
@@ -293,11 +470,7 @@ export function InferencePanel({
         if (data.status === "PAYMENT_CONFIRMED" || data.status === "INVOICED") {
           setPaymentPhase("payment_confirmed");
           retryWithOrder(order.orderId);
-        } else if (
-          data.status === "FAILED" ||
-          data.status === "EXPIRED" ||
-          data.status === "CANCELLED"
-        ) {
+        } else if (data.status === "FAILED" || data.status === "EXPIRED" || data.status === "CANCELLED") {
           setPaymentPhase("payment_expired");
           setPaymentError(`Order ${data.status.toLowerCase()}`);
         }
@@ -353,29 +526,22 @@ export function InferencePanel({
                 {paymentPhase === "payment_required" && (
                   <>
                     <div className="flex items-center gap-2">
-                      <Badge
-                        variant="outline"
-                        className="border-amber-500 text-amber-600"
-                      >
+                      <Badge variant="outline" className="border-amber-500 text-amber-600">
                         Payment Required
                       </Badge>
                     </div>
                     <div className="text-sm space-y-1">
                       <p>
                         <span className="text-muted-foreground">Amount:</span>{" "}
-                        <span className="font-semibold">
-                          {formatAmount(order.amountWei)} {order.tokenSymbol}
-                        </span>
+                        <span className="font-semibold">{formatAmount(order.amountWei)} {order.tokenSymbol}</span>
                       </p>
                       <p>
                         <span className="text-muted-foreground">Chain ID:</span>{" "}
-                        {order.fromChainId}
+                        {order.chainId}
                       </p>
                       <p>
                         <span className="text-muted-foreground">Order:</span>{" "}
-                        <code className="text-xs">
-                          {order.orderId.slice(0, 12)}…
-                        </code>
+                        <code className="text-xs">{order.orderId.slice(0, 12)}…</code>
                       </p>
                     </div>
                     <div className="flex gap-2">
@@ -390,10 +556,7 @@ export function InferencePanel({
                 {paymentPhase === "paying" && (
                   <>
                     <div className="flex items-center gap-2">
-                      <Badge
-                        variant="outline"
-                        className="border-amber-500 text-amber-600"
-                      >
+                      <Badge variant="outline" className="border-amber-500 text-amber-600">
                         Confirm in Wallet
                       </Badge>
                     </div>
@@ -407,10 +570,7 @@ export function InferencePanel({
                 {paymentPhase === "awaiting_confirmation" && (
                   <>
                     <div className="flex items-center gap-2">
-                      <Badge
-                        variant="outline"
-                        className="border-blue-500 text-blue-600"
-                      >
+                      <Badge variant="outline" className="border-blue-500 text-blue-600">
                         Transaction Submitted
                       </Badge>
                     </div>
@@ -421,9 +581,7 @@ export function InferencePanel({
                       {txHash && (
                         <p>
                           <span className="text-muted-foreground">Tx:</span>{" "}
-                          <code className="text-xs">
-                            {txHash.slice(0, 12)}…
-                          </code>
+                          <code className="text-xs">{txHash.slice(0, 12)}…</code>
                         </p>
                       )}
                     </div>
@@ -493,16 +651,12 @@ export function InferencePanel({
               />
 
               <div className="flex items-center gap-3">
-                <Button
-                  onClick={handleSend}
-                  disabled={loading || !prompt.trim()}
-                >
+                <Button onClick={handleSend} disabled={loading || !prompt.trim()}>
                   {loading ? "Streaming…" : "Send"}
                 </Button>
                 {walletAddress && (
                   <span className="text-xs text-muted-foreground">
-                    Wallet: {walletAddress.slice(0, 6)}…
-                    {walletAddress.slice(-4)}
+                    Wallet: {walletAddress.slice(0, 6)}…{walletAddress.slice(-4)}
                   </span>
                 )}
               </div>
@@ -519,3 +673,61 @@ export function InferencePanel({
     </Dialog>
   );
 }
+```
+
+**Step 2: Verify the app builds**
+
+Run: `cd /Users/weitu/Desktop/BUILD/goat-openclaw-hack && npx next build 2>&1 | tail -20`
+
+**Step 3: Commit**
+
+```bash
+git add src/components/InferencePanel.tsx
+git commit -m "feat: in-app wallet payment via goatx402-sdk PaymentHelper"
+```
+
+---
+
+### Task 6: Update skills/client/infer.ts for New Order Shape
+
+**Files:**
+- Modify: `skills/client/infer.ts`
+
+**Step 1: Update the CLI client to handle new Order type**
+
+The CLI client currently expects `order.amount`, `order.symbol`, `order.paymentUrl`. Update references to match the new SDK Order shape: `order.amountWei`, `order.tokenSymbol`. Remove `paymentUrl` references.
+
+Specific changes:
+- Replace `order.amount` → `order.amountWei`
+- Replace `order.symbol` → `order.tokenSymbol`
+- Remove any `order.paymentUrl` references
+- Update status check from `'paid'` to `'PAYMENT_CONFIRMED'`
+- Add `X-Wallet-Address` header to inference requests
+
+**Step 2: Commit**
+
+```bash
+git add skills/client/infer.ts
+git commit -m "feat: update CLI client for new SDK order shape"
+```
+
+---
+
+### Task 7: Smoke Test and Final Commit
+
+**Step 1: Verify sidecar compiles**
+
+Run: `cd /Users/weitu/Desktop/BUILD/goat-openclaw-hack/provider-sidecar && npx tsc --noEmit 2>&1 | head -20`
+
+**Step 2: Verify Next.js builds**
+
+Run: `cd /Users/weitu/Desktop/BUILD/goat-openclaw-hack && npx next build 2>&1 | tail -20`
+
+**Step 3: Fix any compilation errors found**
+
+**Step 4: Final commit if any fixes needed**
+
+```bash
+git add -A
+git commit -m "fix: resolve compilation issues from payment integration"
+```

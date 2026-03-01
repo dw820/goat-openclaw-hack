@@ -8,6 +8,7 @@
     "start": "tsx server.ts"
   },
   "dependencies": {
+    "goatx402-sdk-server": "file:../packages/goatx402-sdk-server",
     "express": "^4.21",
     "cors": "^2.8",
     "dotenv": "^16"

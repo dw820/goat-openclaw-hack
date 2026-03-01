@@ -25,14 +25,26 @@ export function ProviderCard({ provider }: { provider: Provider }) {
       <Card className="flex flex-col">
         <CardHeader>
           <div className="flex items-center justify-between">
-            <h3 className="font-semibold">{provider.model}</h3>
+            <h3 className="font-semibold">{provider.name}</h3>
             <Badge
               variant={provider.status === "online" ? "default" : "secondary"}
             >
               {provider.status}
             </Badge>
           </div>
-          <p className="text-sm text-muted-foreground">{provider.name}</p>
+          <div className="flex flex-wrap gap-1 mt-1">
+            {provider.models && provider.models.length > 0
+              ? provider.models.map((m) => (
+                  <Badge key={m} variant="outline" className="text-xs">
+                    {m}
+                  </Badge>
+                ))
+              : (
+                  <Badge variant="outline" className="text-xs">
+                    {provider.model}
+                  </Badge>
+                )}
+          </div>
         </CardHeader>
 
         <CardContent className="flex-1 space-y-2 text-sm">

@@ -9,6 +9,7 @@ requires:
     - node
     - npm
     - curl
+    # - tailscale  # recommended for internet exposure (Section 6)
   env:
     - GOATX402_API_URL
     - GOATX402_MERCHANT_ID
@@ -44,7 +45,7 @@ credentials and an optional verified badge.
    - `GOATX402_MERCHANT_ID` — your merchant identifier
    - Test USDC, USDT, and gas tokens airdropped to your wallet
 
-4. **Save your `agentId`** — you'll use it in Section 6 to get a "Verified"
+4. **Save your `agentId`** — you'll use it in Section 7 to get a "Verified"
    badge on the marketplace.
 
 5. **Save x402 credentials** — these go into `provider-sidecar/.env` in
@@ -209,7 +210,71 @@ This confirms:
 - The x402 payment gate is active
 - Orders are being created on GOAT Testnet3
 
-## 6. Register on Marketplace
+## 6. Expose Sidecar to the Internet
+
+If the marketplace frontend is deployed to the internet (e.g. Vercel), it
+cannot reach `localhost:4021` on your machine. You need to expose your sidecar
+with a public HTTPS URL. **Tailscale Funnel** is the simplest option — zero
+config, free, and gives you a stable HTTPS URL.
+
+> **Skip this section** if you're running the marketplace locally
+> (`localhost:3000`) and only testing on the same machine.
+
+### Install Tailscale
+
+```bash
+# macOS
+brew install tailscale
+
+# Ubuntu / Debian
+curl -fsSL https://tailscale.com/install.sh | sh
+```
+
+### Enable Funnel
+
+1. Start Tailscale and log in:
+
+```bash
+tailscale up
+```
+
+2. Enable HTTPS and Funnel in the
+   [Tailscale admin console](https://login.tailscale.com/admin/dns):
+   - **DNS → HTTPS Certificates** — toggle on
+   - **DNS → Funnel** — toggle on
+
+### Expose Your Sidecar Port
+
+```bash
+tailscale funnel 4021
+```
+
+Example output:
+
+```
+https://alice-laptop.tail1234.ts.net/
+|-- proxy http://127.0.0.1:4021
+```
+
+Your public URL is `https://alice-laptop.tail1234.ts.net` (yours will differ).
+
+### Verify Reachability
+
+```bash
+curl https://<your-tailscale-url>/health
+```
+
+You should get the same health JSON as in Section 4. If it works, use this URL
+as your `endpoint` when registering in Section 7.
+
+### Alternatives
+
+| Tool | Command | Notes |
+|------|---------|-------|
+| **ngrok** | `ngrok http 4021` | Free tier, random URL changes on restart |
+| **cloudflared** | `cloudflared tunnel --url http://localhost:4021` | Cloudflare account required |
+
+## 7. Register on Marketplace
 
 Register your provider on the Decentralized Inference Marketplace. Include your
 `agentId` from Section 0 to receive a "Verified" badge.
@@ -220,7 +285,7 @@ curl -X POST http://localhost:3000/api/providers \
   -d '{
     "name": "<your-provider-name>",
     "model": "llama3",
-    "endpoint": "http://<your-ip>:4021/v1/chat/completions",
+    "endpoint": "https://<your-tailscale-url>/v1/chat/completions",
     "pricing": {
       "amount": "0.01",
       "symbol": "USDC"
@@ -237,7 +302,7 @@ Expected: **HTTP 201** with your provider object:
   "id": "p_1234567890",
   "name": "<your-provider-name>",
   "model": "llama3",
-  "endpoint": "http://<your-ip>:4021/v1/chat/completions",
+  "endpoint": "https://<your-tailscale-url>/v1/chat/completions",
   "pricing": { "amount": "0.01", "symbol": "USDC" },
   "walletAddress": "0x...",
   "agentId": "<your-agent-id>",
@@ -247,13 +312,16 @@ Expected: **HTTP 201** with your provider object:
 ```
 
 **Important notes**:
-- Use your **LAN IP** (not `localhost`) for the endpoint if the marketplace
-  runs on a different machine or if clients will connect over the network.
+- Use your **Tailscale Funnel URL** (from Section 6) as the endpoint so the
+  marketplace and its users can reach your sidecar over the internet.
+- If running everything locally, you can use `http://localhost:4021/...` instead.
+- Replace `localhost:3000` with your Vercel URL if the marketplace is deployed
+  (e.g. `https://your-marketplace.vercel.app/api/providers`).
 - The `agentId` field is optional but recommended — providers with a valid
   `agentId` display a "Verified" badge in the marketplace UI.
 - Required fields: `name`, `model`, `endpoint`, `pricing`, `walletAddress`.
 
-## 7. Verify Registration
+## 8. Verify Registration
 
 Check that your provider appears in the marketplace:
 
@@ -270,7 +338,7 @@ curl "http://localhost:3000/api/providers?model=llama3"
 Open [http://localhost:3000](http://localhost:3000) in your browser — your
 provider should appear in the provider grid with its model, pricing, and status.
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 | Problem | Cause | Fix |
 |---------|-------|-----|
@@ -278,8 +346,12 @@ provider should appear in the provider grid with its model, pricing, and status.
 | 402 not returned (request goes straight through) | `MOCK_PAYMENTS=true` in `.env` | Set `MOCK_PAYMENTS=false` and restart the sidecar |
 | `order_creation_failed` error | Invalid x402 credentials | Double-check `GOATX402_API_KEY`, `GOATX402_API_SECRET`, and `GOATX402_MERCHANT_ID` in `.env` |
 | Registration returns 400 | Missing required fields | Ensure `name`, `model`, `endpoint`, `pricing`, and `walletAddress` are all provided |
-| Registration returns `Invalid endpoint URL` | Malformed endpoint URL | Use a full URL including protocol (e.g. `http://192.168.1.10:4021/v1/chat/completions`) |
-| Provider shows but status is `"offline"` | Sidecar not reachable from marketplace | Check firewall, use LAN IP, verify sidecar is running |
+| Registration returns `Invalid endpoint URL` | Malformed endpoint URL | Use a full URL including protocol (e.g. `https://alice-laptop.tail1234.ts.net/v1/chat/completions`) |
+| Provider shows but status is `"offline"` | Sidecar not reachable from marketplace | Ensure Tailscale Funnel is running (Section 6) and the endpoint URL is your public Funnel URL |
 | Streaming produces garbled output | Ollama version too old | Upgrade to Ollama 0.1.29+ which supports `/v1/chat/completions` |
 | `upstream_unreachable` on inference | Ollama crashed or wrong endpoint | Restart Ollama, verify `OLLAMA_ENDPOINT` in `.env` |
 | `npm install` fails in sidecar | Node.js version too old | Use Node.js 18+ (`node --version`) |
+| Funnel URL returns connection refused | Tailscale Funnel not running | Run `tailscale funnel 4021` and keep the terminal open |
+| Funnel URL returns 502 | Sidecar not running behind Funnel | Start the sidecar (`npx tsx server.ts`) then retry |
+| `tailscale funnel` says "not available" | Funnel not enabled in admin console | Enable HTTPS certificates and Funnel in [Tailscale admin DNS settings](https://login.tailscale.com/admin/dns) |
+| Model detection fails during registration | Funnel URL not reachable from marketplace | Verify with `curl https://<your-tailscale-url>/health` from another device |

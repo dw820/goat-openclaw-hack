@@ -33,18 +33,20 @@ interface Provider {
 
 interface Order {
   orderId: string
-  amount: string
-  symbol: string
+  flow: string
+  tokenSymbol: string
+  tokenContract: string
+  payToAddress: string
   chainId: number
-  merchantId: string
-  paymentUrl: string
+  amountWei: string
+  expiresAt: number
 }
 
 interface OrderStatus {
   orderId: string
-  status: 'paid' | 'pending' | 'expired'
-  paidAt?: string
+  status: 'CHECKOUT_VERIFIED' | 'PAYMENT_CONFIRMED' | 'INVOICED' | 'FAILED' | 'EXPIRED' | 'CANCELLED'
   txHash?: string
+  confirmedAt?: string
 }
 
 // ---------------------------------------------------------------------------
@@ -139,9 +141,18 @@ const inferBody = {
   stream: true,
 }
 
+// Get wallet address for order creation
+const privateKey = process.env.EVM_PRIVATE_KEY
+let walletAddress = '0x0000000000000000000000000000000000000000'
+if (privateKey) {
+  const { ethers } = await import('ethers')
+  const wallet = new ethers.Wallet(privateKey)
+  walletAddress = wallet.address
+}
+
 const firstRes = await fetch(provider.endpoint, {
   method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
+  headers: { 'Content-Type': 'application/json', 'X-Wallet-Address': walletAddress },
   body: JSON.stringify(inferBody),
 })
 
@@ -160,52 +171,47 @@ if (firstRes.status !== 402) {
 const paymentResponse = (await firstRes.json()) as { error: string; order: Order }
 const order = paymentResponse.order
 console.log(`  Got 402 — payment required`)
-console.log(`  Order ID:    ${order.orderId}`)
-console.log(`  Amount:      ${order.amount} ${order.symbol}`)
-console.log(`  Chain ID:    ${order.chainId}`)
-console.log(`  Payment URL: ${order.paymentUrl}`)
+console.log(`  Order ID:      ${order.orderId}`)
+console.log(`  Amount (wei):  ${order.amountWei} ${order.tokenSymbol}`)
+console.log(`  Chain ID:      ${order.chainId}`)
+console.log(`  Pay to:        ${order.payToAddress}`)
+console.log(`  Flow:          ${order.flow}`)
 
 // ---------------------------------------------------------------------------
 // Step 4: Pay via x402
 // ---------------------------------------------------------------------------
 
 if (dryRun) {
-  console.log('\n[dry-run] Skipping payment. To pay manually, open the payment URL above.')
+  console.log('\n[dry-run] Skipping payment. Order details above.')
   console.log('[dry-run] After paying, retry with:')
   console.log(`  curl -N -X POST ${provider.endpoint} \\`)
   console.log(`    -H "Content-Type: application/json" \\`)
-  console.log(`    -H "X-GOAT-ORDER-ID: ${order.orderId}" \\`)
+  console.log(`    -H "X-Goat-Order-Id: ${order.orderId}" \\`)
   console.log(`    -d '${JSON.stringify(inferBody)}'`)
   process.exit(0)
 }
 
 console.log('[4/6] Completing x402 payment ...')
 
-const privateKey = process.env.EVM_PRIVATE_KEY
 if (!privateKey) {
   console.error('EVM_PRIVATE_KEY not set. Set it or use --dry-run.')
   process.exit(1)
 }
 
-// Try SDK payment
-let paymentSuccess = false
-try {
-  const sdk = await import('goatx402-sdk')
-  const GoatX402Client = (sdk as any).GoatX402Client ?? (sdk as any).default
-  if (GoatX402Client) {
-    const client = new GoatX402Client({ privateKey })
-    const receipt = await client.payOrder(order.orderId)
-    console.log(`  Payment submitted: tx ${receipt.txHash ?? receipt.hash ?? 'pending'}`)
-    paymentSuccess = true
-  }
-} catch {
-  // SDK not available — fall back to payment URL guidance
-}
+const { PaymentHelper } = await import('goatx402-sdk')
+const { ethers } = await import('ethers')
 
-if (!paymentSuccess) {
-  console.log('  goatx402-sdk not available. Pay manually using the payment URL:')
-  console.log(`  ${order.paymentUrl}`)
-  console.log('  Waiting for payment confirmation ...')
+const wallet = new ethers.Wallet(privateKey)
+const rpcProvider = new ethers.JsonRpcProvider(process.env.EVM_RPC_URL ?? 'https://rpc.testnet3.goat.network')
+const signer = wallet.connect(rpcProvider)
+const payment = new PaymentHelper(signer)
+
+const result = await payment.pay(order)
+if (result.success) {
+  console.log(`  Payment submitted: tx ${result.txHash}`)
+} else {
+  console.error(`  Payment failed: ${result.error}`)
+  process.exit(1)
 }
 
 // ---------------------------------------------------------------------------
@@ -225,15 +231,15 @@ for (let attempt = 1; attempt <= maxAttempts; attempt++) {
   const statusRes = await fetch(`${sidecarBase}/api/orders/${order.orderId}/status`)
   if (statusRes.ok) {
     const status = (await statusRes.json()) as OrderStatus
-    if (status.status === 'paid') {
+    if (status.status === 'PAYMENT_CONFIRMED' || status.status === 'INVOICED') {
       console.log(`  Payment confirmed! tx: ${status.txHash ?? 'n/a'}`)
       if (status.txHash) {
         console.log(`  Explorer: https://explorer.testnet3.goat.network/tx/${status.txHash}`)
       }
       break
     }
-    if (status.status === 'expired') {
-      console.error('  Order expired. Please try again.')
+    if (status.status === 'FAILED' || status.status === 'EXPIRED' || status.status === 'CANCELLED') {
+      console.error(`  Order ${status.status.toLowerCase()}. Please try again.`)
       process.exit(1)
     }
   }

@@ -2,8 +2,11 @@ import 'dotenv/config'
 import express from 'express'
 import cors from 'cors'
 import { createOrder, verifyOrder, isMockMode } from './x402-client.js'
-import { proxyToOllama, checkOllamaHealth } from './proxy.js'
+import { proxyToOllama, checkOllamaHealth, getOllamaModels } from './proxy.js'
 import type { ChatCompletionRequest } from './proxy.js'
+import { createLogger } from './logger.js'
+
+const log = createLogger('server')
 
 const app = express()
 app.use(cors())
@@ -12,29 +15,40 @@ app.use(express.json())
 // POST /v1/chat/completions — payment-gated inference
 app.post('/v1/chat/completions', async (req, res) => {
   const body = req.body as ChatCompletionRequest
+  const orderId = req.headers['x-goat-order-id'] as string | undefined
+
+  log.info('Inference request', { model: body.model, hasOrderId: !!orderId })
 
   // Mock mode: bypass payment entirely
   if (isMockMode()) {
-    console.log('[mock] MOCK MODE: bypassing payment, proxying to Ollama')
+    log.debug('Mock mode — bypassing payment')
     await proxyToOllama(body, res)
     return
   }
 
-  const orderId = req.headers['x-goat-order-id'] as string | undefined
-
   if (!orderId) {
     // No payment — create order and return 402
+    const walletAddress = req.headers['x-wallet-address'] as string | undefined
+    if (!walletAddress) {
+      res.status(400).json({
+        error: 'wallet_address_required',
+        message: 'X-Wallet-Address header is required for payment',
+      })
+      return
+    }
+
     try {
       const amount = process.env.PRICE_AMOUNT ?? '0.01'
       const symbol = process.env.PRICE_SYMBOL ?? 'USDC'
-      const order = await createOrder(amount, symbol)
+      const order = await createOrder(amount, symbol, walletAddress)
+      log.info('Order created', { orderId: order.orderId, amount, symbol })
       res.status(402).json({
         error: 'payment_required',
         message: 'x402 payment required for inference',
         order,
       })
     } catch (err) {
-      console.error('[server] createOrder error:', err)
+      log.error('Order creation failed', err)
       res.status(500).json({
         error: 'order_creation_failed',
         message: err instanceof Error ? err.message : String(err),
@@ -46,7 +60,9 @@ app.post('/v1/chat/completions', async (req, res) => {
   // Has order ID — verify payment
   try {
     const status = await verifyOrder(orderId)
-    if (status.status === 'paid') {
+    log.info('Order verified', { orderId, status: status.status })
+    if (status.status === 'PAYMENT_CONFIRMED' || status.status === 'INVOICED') {
+      log.debug('Payment confirmed, proxying to Ollama')
       await proxyToOllama(body, res)
     } else {
       res.status(402).json({
@@ -56,7 +72,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       })
     }
   } catch (err) {
-    console.error('[server] verifyOrder error:', err)
+    log.error('Order verification failed', err)
     res.status(500).json({
       error: 'order_verification_failed',
       message: err instanceof Error ? err.message : String(err),
@@ -67,9 +83,10 @@ app.post('/v1/chat/completions', async (req, res) => {
 // GET /api/orders/:orderId/status — order polling
 app.get('/api/orders/:orderId/status', async (req, res) => {
   const { orderId } = req.params
+  log.debug('Order status poll', { orderId })
 
   if (isMockMode()) {
-    res.json({ orderId, status: 'paid', paidAt: new Date().toISOString(), txHash: '0xmock' })
+    res.json({ orderId, status: 'PAYMENT_CONFIRMED', confirmedAt: new Date().toISOString(), txHash: '0xmock' })
     return
   }
 
@@ -77,7 +94,7 @@ app.get('/api/orders/:orderId/status', async (req, res) => {
     const status = await verifyOrder(orderId)
     res.json(status)
   } catch (err) {
-    console.error('[server] order status error:', err)
+    log.error('Order status check failed', err)
     res.status(500).json({
       error: 'order_status_failed',
       message: err instanceof Error ? err.message : String(err),
@@ -85,10 +102,18 @@ app.get('/api/orders/:orderId/status', async (req, res) => {
   }
 })
 
+// GET /models — list available Ollama models
+app.get('/models', async (_req, res) => {
+  log.debug('Models requested')
+  const models = await getOllamaModels()
+  res.json({ models })
+})
+
 // GET /health — health check
 app.get('/health', async (_req, res) => {
   const ollamaEndpoint = process.env.OLLAMA_ENDPOINT ?? 'http://localhost:11434'
   const ollamaStatus = await checkOllamaHealth()
+  log.debug('Health check', { ollamaStatus })
   res.json({
     status: 'ok',
     provider: 'ollama',
@@ -100,7 +125,7 @@ app.get('/health', async (_req, res) => {
 
 const port = parseInt(process.env.PROVIDER_PORT ?? '4021', 10)
 app.listen(port, () => {
-  console.log(`[sidecar] Provider sidecar running on http://localhost:${port}`)
-  console.log(`[sidecar] Mock payments: ${isMockMode()}`)
-  console.log(`[sidecar] Ollama endpoint: ${process.env.OLLAMA_ENDPOINT ?? 'http://localhost:11434'}`)
+  log.info(`Provider sidecar running on http://localhost:${port}`)
+  log.info(`Mock payments: ${isMockMode()}`)
+  log.info(`Ollama endpoint: ${process.env.OLLAMA_ENDPOINT ?? 'http://localhost:11434'}`)
 })

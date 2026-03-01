@@ -1,0 +1,14 @@
+{
+  "name": "goatx402-sdk",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": { "import": "./src/index.ts", "default": "./src/index.ts", "types": "./src/index.ts" }
+  },
+  "dependencies": { "ethers": "^6.9.0" },
+  "scripts": { "build": "tsc", "dev": "tsc --watch" },
+  "devDependencies": { "typescript": "^5.3.0", "@types/node": "^20.10.0" }
+}
