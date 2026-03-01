@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
+    "dev:public": "tsx server.ts & tailscale funnel ${PROVIDER_PORT:-4021}; kill $!",
     "start": "tsx server.ts"
   },
   "dependencies": {
