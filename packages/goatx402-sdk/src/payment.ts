@@ -11,9 +11,9 @@
  */
 
 import { ethers } from 'ethers'
-import { ERC20Token } from './contracts/erc20.js'
-import { signTypedData } from './eip712/index.js'
-import type { Order, PaymentResult } from './types.js'
+import { ERC20Token } from './contracts/erc20'
+import { signTypedData } from './eip712/index'
+import type { Order, PaymentResult } from './types'
 
 export class PaymentHelper {
   private signer: ethers.Signer

@@ -34,13 +34,13 @@
  */
 
 // Payment helper
-export { PaymentHelper } from './payment.js'
+export { PaymentHelper } from './payment'
 
 // Contract helpers
-export { ERC20Token, parseUnits, formatUnits } from './contracts/index.js'
+export { ERC20Token, parseUnits, formatUnits } from './contracts/index'
 
 // EIP-712 utilities
-export { signTypedData, hashCalldata, verifySignature } from './eip712/index.js'
+export { signTypedData, hashCalldata, verifySignature } from './eip712/index'
 
 // Types
 export type {
@@ -59,4 +59,4 @@ export type {
 
   // Error types
   PaymentError,
-} from './types.js'
+} from './types'
