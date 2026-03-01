@@ -1,0 +1,22 @@
+{
+  "name": "provider-sidecar",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx server.ts",
+    "start": "tsx server.ts"
+  },
+  "dependencies": {
+    "goatx402-sdk-server": "file:../packages/goatx402-sdk-server",
+    "express": "^4.21",
+    "cors": "^2.8",
+    "dotenv": "^16"
+  },
+  "devDependencies": {
+    "typescript": "^5",
+    "tsx": "^4",
+    "@types/express": "^5",
+    "@types/cors": "^2"
+  }
+}
